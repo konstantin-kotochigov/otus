@@ -2,6 +2,7 @@ import pandas
 import numpy
 import time
 import datetime
+import re
 
 from pyspark.sql.types import ArrayType, StringType
 from pyspark.sql import SparkSession
@@ -81,24 +82,26 @@ class CJ_Loader:
         
         # Link processing function
         def __get_link(raw_link):
-            return (substring(substring_index(substring_index(raw_link, '?', 1), '#', 1), 19, 100))
+            return (substr(raw_link, 16, substring_index(raw_link, '?', 1)))
+            
+        def __get_link(raw_link):
+            return raw_link.find("?")
         
         # Select CJ Attributes
         cj_df = self.spark.sql('''
             select
                 cj_id(id, 10008, 10031)[0] as fpc,
-                id.gid as tpc,
-                substring(substring_index(substring_index(cj_attr(attributes, 10071)[0], '?', 1), '#', 1), 19, 100) as link,
+                substring(substring_index(cj_attr(attributes, 10071)[0], '?', 1), 1, 100) as link,
                 ts/1000 as ts
             from cj c
-        ''').filter("tpc is not null and link is not null and fpc is not null")
+        ''').filter("link is not null and fpc is not null")
         
         # Compute TS deltas between events (in hours)
         cj_df.createOrReplaceTempView("cj_df")
-        cj_df_attrs = self.spark.sql("select fpc, tpc, link, ts, lead(ts) over (partition by fpc order by ts) as next_ts from cj_df")
+        cj_df_attrs = self.spark.sql("select fpc, link, ts, lead(ts) over (partition by fpc order by ts) as next_ts from cj_df")
         cj_df_attrs = cj_df_attrs.withColumn("next",(cj_df_attrs["next_ts"]-cj_df_attrs["ts"]) / 3600)
         cj_df_attrs.createOrReplaceTempView("cj_df_attrs")
-        self.cj_df = cj_df_attrs.select("fpc","tpc","ts","next","link")
+        self.cj_df = cj_df_attrs.select("fpc","ts","next","link")
         
         self.cj_df_rows = self.cj_df.count()
         print("Extracted Rows (cj_df) = {}".format(self.cj_df_rows))
@@ -112,15 +115,35 @@ class CJ_Loader:
         
         print("Using Return Window = {} days".format(return_window))
         print("Right Bound = {}".format(datetime.datetime.fromtimestamp(sessions_upper_bound).strftime("%Y-%m-%d")))
-    
-        # Function to make a Row out of a sequence
-        def process_sequence1(id, event_sequence, session_close_event_num):
+        
+        
+        # Generate Target Variables for Each CJ
+        def compute_target(event_list, target_url_regexp, lookahead):
+            
+            # Set initial next target TS
+            next_target_ts = 10000000000
+            
+            # Construct Target Variables List
+            target_list = [-1] * len(event_list[0])
+            
+            for t in range(len(event_list[0])-1,-1,-1):
+        
+                # Set Target variable
+                target_list[t] = 0 if next_target_ts - event_list[0][t] > lookahead else 1
+                
+                # If we encounter Target Url, Update Next Target TS
+                if re.match(target_url_regexp, event_list[2][t]):
+                    next_target_ts=event_list[0][t]
+            
+            return target_list
+            
+        
+        def process_sequence1(id, event_sequence, session_close_event_num, targets):
             return (
                 id,                                                               # FPC
-                event_sequence[3][session_close_event_num],                       # TPC
                 event_sequence[1][0:session_close_event_num+1],                   # deltas
                 event_sequence[2][0:session_close_event_num+1],                   # urls
-                0 if event_sequence[1][session_close_event_num] == None else 1,   # Target
+                targets[session_close_event_num],                                  # Target
                 event_sequence[0][session_close_event_num]                        # TS
             )
         
@@ -132,17 +155,21 @@ class CJ_Loader:
             return (id, f1, f2, f3, f4, f5)
     
         # Create Multiple Session Records
-        def groupAttrs(grouped_row, features_mode, split_mode):
+        def process_event_list(spark_grouped_row, features_mode, split_mode):
         
-            customer_id = grouped_row[0]
+            customer_id = spark_grouped_row[0]
+            data_list = spark_grouped_row[1]
             
-            # Sort By TS
-            sortedList = sorted(grouped_row[1], key=lambda y: y[0])
+            # Sort events by timestamp
+            data_list = sorted(data_list, key=lambda y: y[0])
             
             # Divide event attributes into separate lists
-            dividedList = list(zip(*sortedList))
-            deltas = dividedList[1]
-            timestamps = dividedList[0]
+            event_lists = list(zip(*data_list))
+            deltas = event_lists[1]
+            timestamps = event_lists[0]
+            
+            # Generate Targets
+            targets = compute_target(event_lists, "^https://otus.ru/assessment/", lookahead=60*24*60*60)
             
             # Choose Session boundaries
             if split_mode == "all":
@@ -158,18 +185,18 @@ class CJ_Loader:
             else:
                 process_function = process_sequence2
             
-            return [process_function(customer_id, dividedList, session_close_event_num) for session_close_event_num in session_coordinates]
+            return [process_function(customer_id, event_lists, session_close_event_num, targets) for session_close_event_num in session_coordinates]
             
         
         # Slice By User
         y = self.\
             cj_df.\
-            select(['fpc','tpc','ts','next','link']).rdd.map(lambda x: (x['fpc'], (x['ts'], x['next'], x['link'], x['tpc']))).\
+            select(['fpc','ts','next','link']).rdd.map(lambda x: (x['fpc'], (x['ts'], x['next'], x['link']))).\
             groupByKey().\
-            flatMap(lambda x: groupAttrs(x, features_mode, split_mode)).filter(lambda x: x[5] < sessions_upper_bound).map(lambda x: x[0:5])
+            flatMap(lambda x: process_event_list(x, features_mode, split_mode)).filter(lambda x: x[4] < sessions_upper_bound).map(lambda x: x[0:4])
         
         # Convert To Pandas dataframe
-        y_py = pandas.DataFrame(y.collect(),  columns=['fpc','tpc','dt','url','target'])
+        y_py = pandas.DataFrame(y.collect(),  columns=['fpc','dt','url','target'])
         
         # Process Types
         y_py['url'] = y_py.url.apply(lambda x:" ".join(x))

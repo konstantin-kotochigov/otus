@@ -103,7 +103,7 @@ class CJ_Predictor:
     # data = pandas.read_parquet("/home/kkotochigov/bmw_cj_lstm.parquet")
     # data1 = pandas.read_parquet("/home/kkotochigov/bmw_cj_lstm1.parquet")
     
-    def optimize(self, batch_size):
+    def optimize(self, batch_size, cv_num=10):
         
         auc_mean = []
         auc_std = []
@@ -117,7 +117,7 @@ class CJ_Predictor:
             cv_number = 0
             auc = []
             
-            for cv_train_index, cv_test_index in StratifiedShuffleSplit(n_splits=15, train_size=0.5, test_size=0.15, random_state=123).split(y,y):
+            for cv_train_index, cv_test_index in StratifiedShuffleSplit(n_splits=cv_num, train_size=0.5, test_size=0.15, random_state=123).split(y,y):
                 
                 cv_number += 1
                 print("Fitting Model (CV={}) train length = {}, test length = {}".format(cv_number, len(cv_train_index), len(cv_test_index)))
@@ -152,7 +152,7 @@ class CJ_Predictor:
         
         print("Scoring Data...")
         pred = model.predict(scoring_data)
-        self.result = pandas.DataFrame({"fpc":self.input_data.fpc[self.input_data.target==0], "tpc":self.input_data.tpc[self.input_data.target==0], "return_score":pred.reshape(-1)})
+        self.result = pandas.DataFrame({"fpc":self.input_data.fpc[self.input_data.target==0], "return_score":pred.reshape(-1)})
         self.train_auc = round(roc_auc_score(train_data[1], model.predict(train_data[0], batch_size=batch_size)), 2)
         
         self.result['return_score'] = pandas.cut(self.result.return_score, 5, labels=['1','2','3','4','5'])

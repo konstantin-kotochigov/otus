@@ -34,7 +34,7 @@ def main():
     # Common classes
     spark = SparkSession.builder.appName('analytical_attributes').getOrCreate()
     wd = "/user/kkotochigov/"
-    hdfs_client = InsecureClient("http://159.69.60.71:50070", "hdfs")
+    hdfs_client = InsecureClient("http://159.69.59.101:50070", "hdfs")
     
     
     # Check whether We Need to Refit
@@ -45,7 +45,7 @@ def main():
     # Load Data
     cjp = CJ_Loader(spark)
     cjp.set_organization("21843d80-6f2c-402f-9587-9c501724c646")
-    cjp.load_cj(ts_from=(2010,12,10), ts_to=(2020,12,12))
+    cjp.load_cj(ts_from=(2019,1,1), ts_to=(2019,1,31))
     # cjp.load_cj(ts_from=(2018,12,1), ts_to=(2018,12,31))
     # cjp.cj_stats(ts_from=(2010,12,1), ts_to=(2020,12,31))
     cjp.cj_data.createOrReplaceTempView('cj')
@@ -76,17 +76,13 @@ def main():
     
     # Make Delta
     df = spark.createDataFrame(result)
-    dm = CJ_Export("57efd33d-aaa5-409d-89ce-ff29a86d78a5", "model_update", "http://159.69.60.71:50070", "schema.avsc")
+    dm = CJ_Export("21843d80-6f2c-402f-9587-9c501724c646", "model_update", "http://159.69.59.101:50070", "schema.avsc")
     
     mapping = {
         'id': {
             'fpc': {
                 'primary': 10008,
                 'secondary': 10031
-            },
-            'tpc': {
-                'primary':10005,
-                'secondary':-1
             }
         },
         'attributes': {
