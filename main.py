@@ -33,18 +33,25 @@ def main():
     
     # Common classes
     spark = SparkSession.builder.appName('analytical_attributes').getOrCreate()
-    wd = "/user/kkotochigov/"
-    hdfs_client = InsecureClient("http://159.69.59.101:50070", "hdfs")
     
+    # Working Directories
+    orgid = "21843d80-6f2c-402f-9587-9c501724c646"
+    work_dir = "/data/"+orgid+"/.dmpkit/models/"
+    hadoop_namenode = "http://159.69.59.101:50070"
     
-    # Check whether We Need to Refit
-    model_modification_ts = next(iter([x[1]['modificationTime'] for x in hdfs_client.list(wd+"models/", status=True) if x[0] == "model.pkl"]), None)
+    hdfs_client = InsecureClient(hadoop_namenode, "dmpkit")
+    
+    if "models" not in hdfs_client.list("/data/"+orgid+"/.dmpkit/"):
+        hdfs_client.makedirs("/data/"+orgid+"/.dmpkit/models")
+    
+    # Check whether We Need to Refit our Model
+    model_modification_ts = next(iter([x[1]['modificationTime'] for x in hdfs_client.list(work_dir, status=True) if x[0] == "model.pkl"]), None)
     model_needs_update = True if (model_modification_ts == None) or (time.time() - model_modification_ts > update_model_every) or (arg_refit) else False
     print("Refit = {}".format(model_needs_update))
     
     # Load Data
     cjp = CJ_Loader(spark)
-    cjp.set_organization("21843d80-6f2c-402f-9587-9c501724c646")
+    cjp.set_organization(orgid)
     cjp.load_cj(ts_from=(2019,1,1), ts_to=(2019,1,31))
     # cjp.load_cj(ts_from=(2018,12,1), ts_to=(2018,12,31))
     # cjp.cj_stats(ts_from=(2010,12,1), ts_to=(2020,12,31))
@@ -53,14 +60,14 @@ def main():
     cjp.process_attributes(features_mode="seq", split_mode="all")
     data = cjp.cj_dataset
     
-    # data.to_parquet(wd+"/data_export.parquet")
+    # data.to_parquet(work_dir+"/data_export.parquet")
     
     # Sample Dataset to Reduce Processing Time
     # if arg_sample_rate != 1.0:
     #     (train_index, test_index) = StratifiedShuffleSplit(n_splits=1, train_size=arg_sample_rate).get_n_splits(data, data.target)
     
     # Make Model
-    predictor = CJ_Predictor(wd+"models/", hdfs_client)
+    predictor = CJ_Predictor(work_dir, hdfs_client)
     predictor.set_data(data)
     predictor.optimize(batch_size=4096)
     
@@ -76,7 +83,7 @@ def main():
     
     # Make Delta
     df = spark.createDataFrame(result)
-    dm = CJ_Export("21843d80-6f2c-402f-9587-9c501724c646", "model_update", "http://159.69.59.101:50070", "schema.avsc")
+    dm = CJ_Export(orgid, "model_update", hadoop_namenode, "schema.avsc")
     
     mapping = {
         'id': {
@@ -125,9 +132,9 @@ def main():
     ]
     log = ";".join(log_data)
     
-    log_path = wd+"log/log.csv"
+    log_path = work_dir+"log.csv"
     
-    if "log.csv" not in hdfs_client.list(wd+"log/"):
+    if "log.csv" not in hdfs_client.list(work_dir):
         data_with_header = 'dt;loaded_rows;extracted_rows;processed_rows;refit;send_to_prod;processing_time;fitting_time;train_auc;test_auc;test_auc_std;q1;q2;q3;q4;q5\n'+log + "\n"
         hdfs_client.write(log_path, data=bytes(data_with_header, encoding='utf8'), overwrite=True)
     else:
